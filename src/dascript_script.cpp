@@ -11,6 +11,9 @@
 #include "dascript_language.h"
 #include "dascript_instance.h"
 
+#include <exception>
+#include <mutex>
+
 #if DASCRIPT_HAS_DASLANG
 #include <daScript/daScript.h>
 #include <daScript/ast/ast.h>
@@ -31,6 +34,18 @@ static void gd_print(const char *p_text) {
 	godot::UtilityFunctions::print(godot::String(p_text));
 }
 
+static void gd_print_i32(int32_t p_value) {
+	godot::UtilityFunctions::print((int64_t)p_value);
+}
+
+static void gd_print_f64(double p_value) {
+	godot::UtilityFunctions::print((double)p_value);
+}
+
+static void gd_print_bool(bool p_value) {
+	godot::UtilityFunctions::print((bool)p_value);
+}
+
 static void gd_call_method0(void *p_self, const char *p_method) {
 	if (!p_self || !p_method) {
 		return;
@@ -44,13 +59,100 @@ public:
 	Module_Godot() : Module("godot") {
 		ModuleLibrary lib(this);
 		lib.addBuiltInModule();
+		// Provide a few overloads for convenience.
 		addExtern<DAS_BIND_FUN(gd_print), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print")
 			->args({"text"});
+		addExtern<DAS_BIND_FUN(gd_print_i32), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_i32")
+			->args({"value"});
+		addExtern<DAS_BIND_FUN(gd_print_f64), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_f64")
+			->args({"value"});
+		addExtern<DAS_BIND_FUN(gd_print_bool), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_bool")
+			->args({"value"});
 		addExtern<DAS_BIND_FUN(gd_call_method0), SimNode_ExtFuncCall>(*this, lib, "call_method0", SideEffects::modifyExternal, "gd_call_method0")
 			->args({"self", "method"});
 	}
 	virtual ModuleAotType aotRequire(TextWriter &) const override { return ModuleAotType::cpp; }
 };
+
+static ModuleGroup &get_das_module_group() {
+	static ModuleGroup s_group;
+	static std::once_flag s_once;
+	std::call_once(s_once, []() {
+		s_group.addBuiltInModule();
+		s_group.addModule(new Module_Godot());
+	});
+	return s_group;
+}
+
+
+static bool is_ident_char32(char32_t c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static godot::String rewrite_unqualified_call(const godot::String &p_source, const char *p_name, const char *p_qualified) {
+	const godot::String name(p_name);
+	const godot::String qualified(p_qualified);
+
+	const int32_t len = p_source.length();
+	int32_t pos = 0;
+	int32_t idx = 0;
+	godot::String out;
+	while ((idx = p_source.find(name, pos)) >= 0) {
+		// Reject if it's part of an identifier or already namespace-qualified (foo::bar).
+		if (idx > 0) {
+			char32_t prev = p_source[idx - 1];
+			if (is_ident_char32(prev) || prev == ':') {
+				pos = idx + name.length();
+				continue;
+			}
+		}
+
+		int32_t after = idx + name.length();
+		while (after < len && (p_source[after] == ' ' || p_source[after] == '\t')) {
+			after++;
+		}
+		if (after >= len || p_source[after] != '(') {
+			pos = idx + name.length();
+			continue;
+		}
+
+		out += p_source.substr(pos, idx - pos);
+		out += qualified;
+		pos = idx + name.length();
+	}
+	out += p_source.substr(pos);
+	return out;
+}
+
+static godot::String build_compilation_source(const godot::String &p_source) {
+	// Default to gen1.5 syntax unless the script explicitly sets gen2.
+	const bool has_gen2 = (p_source.find("options gen2=") >= 0);
+	const bool has_require_godot = (p_source.find("require godot") >= 0);
+	const bool needs_print = (p_source.find("print(") >= 0 && p_source.find("godot::print(") < 0);
+	const bool needs_call0 = (p_source.find("call_method0(") >= 0 && p_source.find("godot::call_method0(") < 0);
+	const bool needs_godot = (needs_print || needs_call0);
+
+	godot::String prefix;
+	if (!has_gen2) {
+		prefix += "options gen2=false\n";
+	}
+	if (needs_godot && !has_require_godot) {
+		prefix += "require godot\n";
+	}
+
+	godot::String out = p_source;
+	if (needs_print) {
+		out = rewrite_unqualified_call(out, "print", "godot::print");
+	}
+	if (needs_call0) {
+		out = rewrite_unqualified_call(out, "call_method0", "godot::call_method0");
+	}
+
+	if (!prefix.is_empty()) {
+		out = prefix + "\n" + out;
+	}
+	return out;
+}
 
 static char *dup_cstr(const char *p_str, size_t p_len) {
 	char *mem = (char *)malloc(p_len + 1);
@@ -133,9 +235,29 @@ Error DAScript::_reload(bool /*p_keep_state*/) {
 		discovered_methods.clear();
 		return OK;
 	}
+
+	// Do not compile while editing in the editor. Godot may call reload extremely frequently
+	// (often per keystroke). Compilation should be explicit (save/run) to keep the editor robust.
+	if (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
+		valid = true;
+		scan_discovered_methods();
+		return OK;
+	}
 	
 	#if DASCRIPT_HAS_DASLANG
-	return compile_source(false);
+	try {
+		return compile_source(false);
+	} catch (const std::exception &e) {
+		valid = false;
+		compile_error = String("Exception during daScript compilation: ") + String(e.what());
+		compile_errors = Array();
+		return ERR_PARSE_ERROR;
+	} catch (...) {
+		valid = false;
+		compile_error = String("Unknown exception during daScript compilation.");
+		compile_errors = Array();
+		return ERR_PARSE_ERROR;
+	}
 	#else
 	// Fallback: reload just re-scans the source.
 	valid = true;
@@ -146,13 +268,19 @@ Error DAScript::_reload(bool /*p_keep_state*/) {
 
 #if DASCRIPT_HAS_DASLANG
 Error DAScript::compile_source(bool /*p_keep_state*/) {
+	static std::mutex s_compile_mutex;
+	std::lock_guard<std::mutex> lock(s_compile_mutex);
 	compile_log = "";
 	compile_error = "";
 	compile_errors = Array();
 	compiled_program = nullptr;
+	compiled_access.reset();
 
 	// Resolve a stable, OS path for daScript's file-based diagnostics.
-	String res_path = get_path();
+	String res_path = diagnostic_path;
+	if (res_path.is_empty()) {
+		res_path = get_path();
+	}
 	String os_path = res_path;
 	if (godot::ProjectSettings::get_singleton()) {
 		os_path = godot::ProjectSettings::get_singleton()->globalize_path(res_path);
@@ -162,12 +290,11 @@ Error DAScript::compile_source(bool /*p_keep_state*/) {
 	}
 
 	std::string file_name = os_path.utf8().get_data();
-	std::string code_utf8 = source_code.utf8().get_data();
+	String compilation_source = build_compilation_source(source_code);
+	std::string code_utf8 = compilation_source.utf8().get_data();
 
 	TextWriter logs;
-	ModuleGroup libGroup;
-	libGroup.addBuiltInModule();
-	libGroup.addModule(new Module_Godot());
+	ModuleGroup &libGroup = get_das_module_group();
 
 	FileAccessPtr access = make_smart<FileAccess>();
 	char *owned = dup_cstr(code_utf8.c_str(), code_utf8.size());
@@ -178,11 +305,17 @@ Error DAScript::compile_source(bool /*p_keep_state*/) {
 	}
 	auto fileInfo = make_unique<TextFileInfo>(owned, (uint32_t)code_utf8.size(), /*own*/true);
 	access->setFileInfo(file_name, das::move(fileInfo));
+	// Keep access alive for as long as the compiled program exists.
+	compiled_access = access;
 
 	compiled_program = compileDaScript(file_name, access, logs, libGroup);
 	compile_log = String(logs.str().c_str());
+	bool failed = false;
+	if (compiled_program) {
+		failed = compiled_program->failed();
+	}
 
-	if (!compiled_program || compiled_program->failed()) {
+	if (!compiled_program || failed) {
 		valid = false;
 		compile_error = "daScript compilation failed.";
 		if (compiled_program) {
@@ -204,6 +337,81 @@ Error DAScript::compile_source(bool /*p_keep_state*/) {
 	scan_discovered_methods();
 	return OK;
 }
+
+Error DAScript::compile_silent() {
+	#if DASCRIPT_HAS_DASLANG
+	try {
+		return compile_source(false);
+	} catch (const std::exception &e) {
+		valid = false;
+		compile_error = String("Exception during daScript compilation: ") + String(e.what());
+		compile_errors = Array();
+		return ERR_PARSE_ERROR;
+	} catch (...) {
+		valid = false;
+		compile_error = String("Unknown exception during daScript compilation.");
+		compile_errors = Array();
+		return ERR_PARSE_ERROR;
+	}
+	#else
+	return OK;
+	#endif
+}
+
+Error DAScript::compile_for_tools() {
+	#if DASCRIPT_HAS_DASLANG
+	try {
+		// Compile even in editor so save/reload can show syntax errors.
+		Error err = compile_source(false);
+		// Update Script Editor diagnostics cache.
+		String p = get_path();
+		if (p.is_empty()) {
+			p = diagnostic_path;
+		}
+		DAScriptLanguage::cache_validation_result(p, (uint64_t)source_code.hash(), compile_errors, (err == OK && valid));
+		if (err != OK || !valid) {
+			String header = compile_error;
+			if (header.is_empty()) {
+				header = "daScript compilation failed.";
+			}
+			godot::UtilityFunctions::push_error(String("[DAScript] compile failed: ") + header);
+
+			// Print a few structured errors with line/column.
+			const int max_emit = 10;
+			for (int i = 0; i < compile_errors.size() && i < max_emit; i++) {
+				Dictionary e = compile_errors[i];
+				int line = (int)e.get("line", 0);
+				int col = (int)e.get("column", 0);
+				String msg = e.get("message", String(""));
+				String extra = e.get("extra", String(""));
+				String loc = String("L") + itos(line) + String(":") + itos(col);
+				if (!extra.is_empty()) {
+					msg += String(" ") + extra;
+				}
+				godot::UtilityFunctions::push_error(String("[DAScript] ") + loc + String(": ") + msg);
+			}
+			if (!compile_log.is_empty()) {
+				godot::UtilityFunctions::print(String("[DAScript] compile log:\n") + compile_log);
+			}
+		}
+		return err;
+	} catch (const std::exception &e) {
+		valid = false;
+		compile_error = String("Exception during daScript compilation: ") + String(e.what());
+		compile_errors = Array();
+		godot::UtilityFunctions::push_error(String("[DAScript] ") + compile_error);
+		return ERR_PARSE_ERROR;
+	} catch (...) {
+		valid = false;
+		compile_error = String("Unknown exception during daScript compilation.");
+		compile_errors = Array();
+		godot::UtilityFunctions::push_error(String("[DAScript] ") + compile_error);
+		return ERR_PARSE_ERROR;
+	}
+	#else
+	return OK;
+	#endif
+}
 #endif
 
 bool DAScript::_has_method(const StringName &p_method) const {
@@ -212,6 +420,24 @@ bool DAScript::_has_method(const StringName &p_method) const {
 
 bool DAScript::_has_static_method(const StringName &p_method) const {
 	return false; // DAScript doesn't support static methods yet
+}
+
+TypedArray<Dictionary> DAScript::_get_script_signal_list() const {
+	// No signals declared by the language yet.
+	return TypedArray<Dictionary>();
+}
+
+Variant DAScript::_get_script_method_argument_count(const StringName &p_method) const {
+	// Unknown -> return NIL so engine uses fallback paths.
+	(void)p_method;
+	return Variant();
+}
+
+Dictionary DAScript::_get_method_info(const StringName &p_method) const {
+	// Minimal method info. Godot accepts empty dict for unknown methods.
+	Dictionary d;
+	d["name"] = String(p_method);
+	return d;
 }
 
 Ref<Script> DAScript::_get_base_script() const {

@@ -31,8 +31,6 @@ String DAScriptResourceFormatLoader::_get_resource_type(const String &p_path) co
 }
 
 Variant DAScriptResourceFormatLoader::_load(const String &p_path, const String &p_original_path, bool p_use_sub_threads, int32_t p_cache_mode) const {
-	UtilityFunctions::print("DAScript: Loading file: ", p_path);
-	
 	Ref<DAScript> script;
 	script.instantiate();
 	
@@ -52,18 +50,13 @@ Variant DAScriptResourceFormatLoader::_load(const String &p_path, const String &
 	String source = f->get_as_text();
 	f->close();
 	
-	UtilityFunctions::print("DAScript: File loaded, source length: ", source.length());
-
 	script->set_source_code(source);
-	
-	UtilityFunctions::print("DAScript: Calling reload...");
+
 	Error err = script->_reload(false);
 	if (err != OK) {
-		UtilityFunctions::push_error("DAScript: Reload failed with error: ", err);
-		// Return the script anyway so it can be edited
+		UtilityFunctions::push_error(String("DAScript: Reload failed for ") + p_path + String(" (error ") + itos((int)err) + String(")"));
+		// Return the script anyway so it can be edited.
 	}
-	
-	UtilityFunctions::print("DAScript: Load complete");
 
 	return script;
 }
@@ -119,6 +112,16 @@ Error DAScriptResourceFormatSaver::_save(const Ref<Resource> &p_resource, const 
 
 	file->store_string(source);
 	file->close();
+
+	// Development ergonomics: compile on save so syntax errors are visible immediately.
+	// Note: this compiles an in-memory copy with default options injected for compilation,
+	// but does not modify the saved file.
+	#if DASCRIPT_HAS_DASLANG
+	{
+		// compile_for_tools() handles emitting detailed diagnostics itself.
+		script->compile_for_tools();
+	}
+	#endif
 
 	return OK;
 }

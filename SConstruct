@@ -49,7 +49,7 @@ if has_daslang:
     ])
     # daScript has some very large TU's on MSVC.
     if not env.get("use_mingw", False):
-        env.AppendUnique(CCFLAGS=["/bigobj"])
+        env.AppendUnique(CCFLAGS=["/bigobj", "/EHsc"])
 else:
     env.AppendUnique(CPPDEFINES=["DASCRIPT_HAS_DASLANG=0"])
 

@@ -5,7 +5,48 @@
 
 #include "dascript_script.h"
 
+#include <godot_cpp/templates/hash_map.hpp>
+
+#include <mutex>
+
 namespace godot {
+
+namespace {
+struct ValidationCacheEntry {
+	uint64_t source_hash = 0;
+	Array errors;
+	bool valid = true;
+};
+
+static std::mutex s_validation_cache_mutex;
+static HashMap<String, ValidationCacheEntry> s_validation_cache;
+} // namespace
+
+void DAScriptLanguage::cache_validation_result(const String &p_path, uint64_t p_source_hash, const Array &p_errors, bool p_valid) {
+	if (p_path.is_empty()) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(s_validation_cache_mutex);
+	ValidationCacheEntry e;
+	e.source_hash = p_source_hash;
+	e.errors = p_errors;
+	e.valid = p_valid;
+	s_validation_cache[p_path] = e;
+}
+
+bool DAScriptLanguage::get_cached_validation_result(const String &p_path, uint64_t p_source_hash, Array &r_errors, bool &r_valid) {
+	std::lock_guard<std::mutex> lock(s_validation_cache_mutex);
+	HashMap<String, ValidationCacheEntry>::Iterator it = s_validation_cache.find(p_path);
+	if (it == s_validation_cache.end()) {
+		return false;
+	}
+	if (it->value.source_hash != p_source_hash) {
+		return false;
+	}
+	r_errors = it->value.errors;
+	r_valid = it->value.valid;
+	return true;
+}
 
 DAScriptLanguage *DAScriptLanguage::singleton = nullptr;
 
@@ -133,7 +174,7 @@ Object *DAScriptLanguage::_create_script() const {
 	return memnew(DAScript);
 }
 
-Dictionary DAScriptLanguage::_validate(const String &p_script, const String &p_path, bool /*p_validate_functions*/, bool /*p_validate_errors*/, bool /*p_validate_warnings*/, bool /*p_validate_safe_lines*/) const {
+Dictionary DAScriptLanguage::_validate(const String &p_script, const String &p_path, bool /*p_validate_functions*/, bool p_validate_errors, bool /*p_validate_warnings*/, bool /*p_validate_safe_lines*/) const {
 	// Godot expects certain keys to always exist in the returned Dictionary.
 	// Missing keys can break script creation in the editor.
 	Dictionary result;
@@ -146,29 +187,100 @@ Dictionary DAScriptLanguage::_validate(const String &p_script, const String &p_p
 	// Godot requires "inherit" to exist even if empty.
 	result[String("inherit")] = String();
 
-	#if DASCRIPT_HAS_DASLANG
-	Ref<DAScript> scr;
-	scr.instantiate();
-	scr->set_source_code(p_script);
-	Error err = scr->_reload(false);
-
+	// IMPORTANT:
+	// - Keep typing safe: compile is wrapped and cached.
+	// - Still show real errors in the Script Editor when Godot asks for them.
 	Array errors;
-	if (err != OK || !scr->is_valid()) {
-		if (scr->get_compile_errors().size() > 0) {
-			errors = scr->get_compile_errors();
-		} else {
-			Dictionary e;
-			e[String("line")] = 0;
-			e[String("column")] = 0;
-			e[String("message")] = scr->get_compile_error();
-			errors.push_back(e);
+
+	// Lightweight heuristic: flag Python-like ':' blocks early.
+	if (!p_script.is_empty()) {
+		int32_t idx = 0;
+		while (idx >= 0) {
+			idx = p_script.find("def", idx);
+			if (idx < 0) {
+				break;
+			}
+			int32_t line_end = p_script.find("\n", idx);
+			if (line_end < 0) {
+				line_end = p_script.length();
+			}
+			String line = p_script.substr(idx, line_end - idx);
+			if (line.find(":") >= 0) {
+				Dictionary e;
+				e[String("line")] = 0;
+				e[String("column")] = 0;
+				e[String("message")] = String("daScript does not use ':' blocks. Remove ':' and use daScript indentation/syntax.");
+				errors.push_back(e);
+				break;
+			}
+			idx = line_end;
 		}
-		result[String("valid")] = false;
 	}
-	result[String("errors")] = errors;
+
+	#if DASCRIPT_HAS_DASLANG
+	// Do NOT compile during validation; it can be called on background threads during editor load.
+	// Instead, return cached diagnostics from the last compile-on-save / tool reload.
+	if (p_validate_errors) {
+		Array cached_errors;
+		bool cached_valid = true;
+		const uint64_t h = (uint64_t)p_script.hash();
+		if (get_cached_validation_result(p_path, h, cached_errors, cached_valid)) {
+			errors = cached_errors;
+			if (!cached_valid) {
+				result[String("valid")] = false;
+				result[String("errors")] = errors;
+				return result;
+			}
+		}
+	}
 	#endif
 
+	if (errors.size() > 0) {
+		result[String("valid")] = false;
+		result[String("errors")] = errors;
+	}
+
 	return result;
+}
+
+String DAScriptLanguage::_debug_get_error() const {
+	return String();
+}
+
+int32_t DAScriptLanguage::_debug_get_stack_level_count() const {
+	return 0;
+}
+
+int32_t DAScriptLanguage::_debug_get_stack_level_line(int32_t /*p_level*/) const {
+	return 0;
+}
+
+String DAScriptLanguage::_debug_get_stack_level_function(int32_t /*p_level*/) const {
+	return String();
+}
+
+String DAScriptLanguage::_debug_get_stack_level_source(int32_t /*p_level*/) const {
+	return String();
+}
+
+Dictionary DAScriptLanguage::_debug_get_stack_level_locals(int32_t /*p_level*/, int32_t /*p_max_subitems*/, int32_t /*p_max_depth*/) {
+	return Dictionary();
+}
+
+Dictionary DAScriptLanguage::_debug_get_stack_level_members(int32_t /*p_level*/, int32_t /*p_max_subitems*/, int32_t /*p_max_depth*/) {
+	return Dictionary();
+}
+
+void *DAScriptLanguage::_debug_get_stack_level_instance(int32_t /*p_level*/) {
+	return nullptr;
+}
+
+Dictionary DAScriptLanguage::_debug_get_globals(int32_t /*p_max_subitems*/, int32_t /*p_max_depth*/) {
+	return Dictionary();
+}
+
+String DAScriptLanguage::_debug_parse_stack_level_expression(int32_t /*p_level*/, const String &/*p_expression*/, int32_t /*p_max_subitems*/, int32_t /*p_max_depth*/) {
+	return String();
 }
 
 String DAScriptLanguage::_validate_path(const String &p_path) const {
@@ -333,7 +445,11 @@ void DAScriptLanguage::_reload_tool_script(const Ref<Script> &p_script, bool p_s
 	(void)p_soft_reload;
 	Ref<DAScript> ds = p_script;
 	if (ds.is_valid()) {
+		#if DASCRIPT_HAS_DASLANG
+		ds->compile_for_tools();
+		#else
 		ds->_reload(false);
+		#endif
 	}
 }
 

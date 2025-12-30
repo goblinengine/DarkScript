@@ -43,21 +43,13 @@ void initialize_dascript_module(ModuleInitializationLevel p_level) {
 		ClassDB::register_class<DAScriptResourceFormatSaver>();
 
 		s_resource_loader.instantiate();
-		UtilityFunctions::print("DAScript: Resource loader instantiated: ", s_resource_loader.is_valid());
 		if (ResourceLoader::get_singleton()) {
 			ResourceLoader::get_singleton()->add_resource_format_loader(s_resource_loader);
-			UtilityFunctions::print("DAScript: Resource loader registered");
-		} else {
-			UtilityFunctions::print("DAScript: ERROR - ResourceLoader singleton is null!");
 		}
 
 		s_resource_saver.instantiate();
-		UtilityFunctions::print("DAScript: Resource saver instantiated: ", s_resource_saver.is_valid());
 		if (ResourceSaver::get_singleton()) {
 			ResourceSaver::get_singleton()->add_resource_format_saver(s_resource_saver);
-			UtilityFunctions::print("DAScript: Resource saver registered");
-		} else {
-			UtilityFunctions::print("DAScript: ERROR - ResourceSaver singleton is null!");
 		}
 	}
 }

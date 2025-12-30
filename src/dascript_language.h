@@ -18,6 +18,10 @@ public:
 	static DAScriptLanguage *get_singleton() { return singleton; }
 	static void set_language_singleton(DAScriptLanguage *p_singleton) { singleton = p_singleton; }
 
+	// Validation diagnostics cache (populated by compile-on-save / tool reload).
+	static void cache_validation_result(const String &p_path, uint64_t p_source_hash, const Array &p_errors, bool p_valid);
+	static bool get_cached_validation_result(const String &p_path, uint64_t p_source_hash, Array &r_errors, bool &r_valid);
+
 	String _get_name() const override;
 	void _init() override;
 	String _get_type() const override;
@@ -58,6 +62,16 @@ public:
 	void _reload_tool_script(const Ref<Script> &p_script, bool p_soft_reload) override;
 	void _thread_enter() override;
 	void _thread_exit() override;
+	String _debug_get_error() const override;
+	int32_t _debug_get_stack_level_count() const override;
+	int32_t _debug_get_stack_level_line(int32_t p_level) const override;
+	String _debug_get_stack_level_function(int32_t p_level) const override;
+	String _debug_get_stack_level_source(int32_t p_level) const override;
+	Dictionary _debug_get_stack_level_locals(int32_t p_level, int32_t p_max_subitems, int32_t p_max_depth) override;
+	Dictionary _debug_get_stack_level_members(int32_t p_level, int32_t p_max_subitems, int32_t p_max_depth) override;
+	void *_debug_get_stack_level_instance(int32_t p_level) override;
+	Dictionary _debug_get_globals(int32_t p_max_subitems, int32_t p_max_depth) override;
+	String _debug_parse_stack_level_expression(int32_t p_level, const String &p_expression, int32_t p_max_subitems, int32_t p_max_depth) override;
 	void _frame() override;
 	bool _handles_global_class_type(const String &p_type) const override;
 	Dictionary _get_global_class_name(const String &p_path) const override;

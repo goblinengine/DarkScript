@@ -2,6 +2,7 @@
 
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/classes/node.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <vector>
@@ -30,6 +31,7 @@ bool DAScriptInstance::ensure_context() {
 		return true;
 	}
 	last_runtime_error = "";
+	runtime_error_reported = false;
 
 	if (!script || !script->is_valid()) {
 		last_runtime_error = "Script is not valid.";
@@ -37,7 +39,11 @@ bool DAScriptInstance::ensure_context() {
 	}
 	auto program = script->get_compiled_program();
 	if (!program) {
-		last_runtime_error = "Script has no compiled program (reload/compile failed).";
+		// In the editor, scripts are often partially typed and not yet compilable.
+		// Never treat this as a runtime error in editor context.
+		if (!(Engine::get_singleton() && Engine::get_singleton()->is_editor_hint())) {
+			last_runtime_error = "Script has no compiled program (reload/compile failed).";
+		}
 		return false;
 	}
 	if (!ctx) {
@@ -343,11 +349,14 @@ bool DAScriptInstance::has_method(const StringName &p_method) const {
 
 void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, int p_argcount, Variant &r_ret, GDExtensionCallError &r_error) {
 	#if DASCRIPT_HAS_DASLANG
+	// Never spam errors while the editor is just probing the script.
+	const bool editor_hint = (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint());
 	if (call_das_function(p_method, p_args, p_argcount, r_ret, r_error)) {
 		return;
 	}
-	// If execution failed, surface a useful error in editor.
-	if (!last_runtime_error.is_empty()) {
+	// If execution failed, surface a useful error once (outside editor).
+	if (!editor_hint && !last_runtime_error.is_empty() && !runtime_error_reported) {
+		runtime_error_reported = true;
 		UtilityFunctions::push_error(String("[DAScript] runtime error: ") + last_runtime_error);
 	}
 	#else

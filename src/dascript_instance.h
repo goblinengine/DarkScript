@@ -4,6 +4,13 @@
 
 #include <godot_cpp/godot.hpp>
 
+#if DASCRIPT_HAS_DASLANG
+namespace das {
+	class Context;
+	struct SimFunction;
+}
+#endif
+
 namespace godot {
 
 class Object;
@@ -14,8 +21,18 @@ class DAScriptInstance {
 	Object *owner = nullptr;
 	DAScript *script = nullptr;
 
+#if DASCRIPT_HAS_DASLANG
+	das::Context *ctx = nullptr;
+	bool ctx_ready = false;
+	String last_runtime_error;
+
+	bool ensure_context();
+	bool call_das_function(const StringName &p_method, const godot::Variant **p_args, int p_argcount, godot::Variant &r_ret, GDExtensionCallError &r_error);
+#endif
+
 public:
 	DAScriptInstance(Object *p_owner, DAScript *p_script) : owner(p_owner), script(p_script) {}
+	~DAScriptInstance();
 
 	static void *create(Object *p_owner, DAScript *p_script);
 

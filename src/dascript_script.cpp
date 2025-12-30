@@ -1,10 +1,70 @@
 #include "dascript_script.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/object.hpp>
+#include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "dascript_language.h"
 #include "dascript_instance.h"
+
+#if DASCRIPT_HAS_DASLANG
+#include <daScript/daScript.h>
+#include <daScript/ast/ast.h>
+#include <daScript/simulate/debug_info.h>
+
+// Optional: basic module to let scripts interact with Godot.
+// Usage in .das:
+//   require godot
+//   godot::print("hello")
+namespace {
+using namespace das;
+
+static void gd_print(const char *p_text) {
+	if (!p_text) {
+		godot::UtilityFunctions::print(godot::String(""));
+		return;
+	}
+	godot::UtilityFunctions::print(godot::String(p_text));
+}
+
+static void gd_call_method0(void *p_self, const char *p_method) {
+	if (!p_self || !p_method) {
+		return;
+	}
+	auto *obj = reinterpret_cast<godot::Object *>(p_self);
+	obj->call(godot::StringName(p_method));
+}
+
+class Module_Godot : public Module {
+public:
+	Module_Godot() : Module("godot") {
+		ModuleLibrary lib(this);
+		lib.addBuiltInModule();
+		addExtern<DAS_BIND_FUN(gd_print), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print")
+			->args({"text"});
+		addExtern<DAS_BIND_FUN(gd_call_method0), SimNode_ExtFuncCall>(*this, lib, "call_method0", SideEffects::modifyExternal, "gd_call_method0")
+			->args({"self", "method"});
+	}
+	virtual ModuleAotType aotRequire(TextWriter &) const override { return ModuleAotType::cpp; }
+};
+
+static char *dup_cstr(const char *p_str, size_t p_len) {
+	char *mem = (char *)malloc(p_len + 1);
+	if (!mem) {
+		return nullptr;
+	}
+	memcpy(mem, p_str, p_len);
+	mem[p_len] = '\0';
+	return mem;
+}
+} // namespace
+
+godot::HashSet<godot::DAScript *> godot::DAScript::live_scripts;
+#endif
 
 namespace godot {
 
@@ -47,17 +107,97 @@ void DAScript::scan_discovered_methods() {
 	discovered_methods.insert(StringName("_exit_tree"));
 }
 
+DAScript::DAScript() {
+	#if DASCRIPT_HAS_DASLANG
+	live_scripts.insert(this);
+	#endif
+}
+
+DAScript::~DAScript() {
+	#if DASCRIPT_HAS_DASLANG
+	live_scripts.erase(this);
+	#endif
+}
+
 void DAScript::_set_source_code(const String &p_code) {
 	source_code = p_code;
 	scan_discovered_methods();
+	// In-editor edits should make reload/validation meaningful.
+	// Godot will call _reload separately in many cases.
 }
 
 Error DAScript::_reload(bool /*p_keep_state*/) {
-	// Until Daslang is integrated, reload just re-scans the source.
+	#if DASCRIPT_HAS_DASLANG
+	return compile_source(false);
+	#else
+	// Fallback: reload just re-scans the source.
+	valid = true;
+	scan_discovered_methods();
+	return OK;
+	#endif
+}
+
+#if DASCRIPT_HAS_DASLANG
+Error DAScript::compile_source(bool /*p_keep_state*/) {
+	compile_log = "";
+	compile_error = "";
+	compile_errors = Array();
+	compiled_program = nullptr;
+
+	// Resolve a stable, OS path for daScript's file-based diagnostics.
+	String res_path = get_path();
+	String os_path = res_path;
+	if (godot::ProjectSettings::get_singleton()) {
+		os_path = godot::ProjectSettings::get_singleton()->globalize_path(res_path);
+	}
+	if (os_path.is_empty()) {
+		os_path = "<dascript>";
+	}
+
+	std::string file_name = os_path.utf8().get_data();
+	std::string code_utf8 = source_code.utf8().get_data();
+
+	TextWriter logs;
+	ModuleGroup libGroup;
+	libGroup.addBuiltInModule();
+	libGroup.addModule(new Module_Godot());
+
+	FileAccessPtr access = make_smart<FileAccess>();
+	char *owned = dup_cstr(code_utf8.c_str(), code_utf8.size());
+	if (!owned) {
+		valid = false;
+		compile_error = "Out of memory while preparing script source.";
+		return ERR_OUT_OF_MEMORY;
+	}
+	auto fileInfo = make_unique<TextFileInfo>(owned, (uint32_t)code_utf8.size(), /*own*/true);
+	access->setFileInfo(file_name, das::move(fileInfo));
+
+	compiled_program = compileDaScript(file_name, access, logs, libGroup);
+	compile_log = String(logs.str().c_str());
+
+	if (!compiled_program || compiled_program->failed()) {
+		valid = false;
+		compile_error = "daScript compilation failed.";
+		if (compiled_program) {
+			for (auto &err : compiled_program->errors) {
+				Dictionary e;
+				e["line"] = (int)err.at.line;
+				e["column"] = (int)err.at.column;
+				e["message"] = String(err.what.c_str());
+				e["extra"] = String(err.extra.c_str());
+				compile_errors.push_back(e);
+			}
+		}
+		return ERR_PARSE_ERROR;
+	}
+
+	// Update discovered methods (best-effort). We keep the quick scan for now,
+	// but compilation success means the callbacks are invokable.
 	valid = true;
 	scan_discovered_methods();
 	return OK;
 }
+#endif
 
 bool DAScript::_has_method(const StringName &p_method) const {
 	return discovered_methods.has(p_method);

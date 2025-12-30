@@ -8,12 +8,20 @@
 #include "dascript_language.h"
 #include "dascript_script.h"
 
+#if DASCRIPT_HAS_DASLANG
+#include <daScript/daScriptC.h>
+#endif
+
 namespace godot {
 
 static DAScriptLanguage *s_language = nullptr;
 
 void initialize_dascript_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
+		#if DASCRIPT_HAS_DASLANG
+		das_initialize();
+		#endif
+
 		ClassDB::register_class<DAScriptLanguage>();
 		ClassDB::register_class<DAScript>();
 
@@ -32,6 +40,10 @@ void uninitialize_dascript_module(ModuleInitializationLevel p_level) {
 			s_language = nullptr;
 		}
 		DAScriptLanguage::set_language_singleton(nullptr);
+
+		#if DASCRIPT_HAS_DASLANG
+		das_shutdown();
+		#endif
 	}
 }
 

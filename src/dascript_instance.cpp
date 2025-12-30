@@ -1,6 +1,7 @@
 #include "dascript_instance.h"
 
 #include <godot_cpp/classes/object.hpp>
+#include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <vector>
@@ -8,7 +9,178 @@
 #include "dascript_script.h"
 #include "dascript_language.h"
 
+#if DASCRIPT_HAS_DASLANG
+#include <daScript/daScript.h>
+#include <daScript/simulate/cast.h>
+#include <daScript/simulate/simulate.h>
+#include <daScript/simulate/debug_info.h>
+#endif
 namespace godot {
+
+#if DASCRIPT_HAS_DASLANG
+DAScriptInstance::~DAScriptInstance() {
+	if (ctx) {
+		delete ctx;
+		ctx = nullptr;
+	}
+}
+
+bool DAScriptInstance::ensure_context() {
+	if (ctx_ready) {
+		return true;
+	}
+	last_runtime_error = "";
+
+	if (!script || !script->is_valid()) {
+		last_runtime_error = "Script is not valid.";
+		return false;
+	}
+	auto program = script->get_compiled_program();
+	if (!program) {
+		last_runtime_error = "Script has no compiled program (reload/compile failed).";
+		return false;
+	}
+	if (!ctx) {
+		ctx = new das::Context((uint32_t)program->getContextStackSize());
+	}
+	das::TextWriter logs;
+	if (!program->simulate(*ctx, logs)) {
+		last_runtime_error = String("daScript simulate failed: ") + String(logs.str().c_str());
+		return false;
+	}
+	ctx->runInitScript();
+	ctx_ready = true;
+	return true;
+}
+
+static bool variant_to_vec4f(const Variant &v, vec4f &out) {
+	using namespace das;
+	switch (v.get_type()) {
+		case Variant::Type::NIL:
+			out = cast<void *>::from(nullptr);
+			return true;
+		case Variant::Type::BOOL:
+			out = cast<bool>::from((bool)v);
+			return true;
+		case Variant::Type::INT:
+			out = cast<int64_t>::from((int64_t)v);
+			return true;
+		case Variant::Type::FLOAT:
+			out = cast<double>::from((double)v);
+			return true;
+		case Variant::Type::STRING: {
+			static thread_local std::string tmp;
+			tmp = String(v).utf8().get_data();
+			out = cast<char *>::from((char *)tmp.c_str());
+			return true;
+		}
+		case Variant::Type::OBJECT: {
+			Object *obj = Object::cast_to<Object>(v);
+			out = cast<void *>::from((void *)obj);
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+static Variant vec4f_to_variant(vec4f v, das::TypeInfo *type_info) {
+	using namespace das;
+	if (!type_info) {
+		return Variant();
+	}
+	switch (type_info->type) {
+		case Type::tVoid:
+			return Variant();
+		case Type::tBool:
+			return Variant(cast<bool>::to(v));
+		case Type::tInt:
+			return Variant((int64_t)cast<int32_t>::to(v));
+		case Type::tInt64:
+			return Variant((int64_t)cast<int64_t>::to(v));
+		case Type::tUInt:
+			return Variant((int64_t)cast<uint32_t>::to(v));
+		case Type::tUInt64:
+			return Variant((int64_t)cast<uint64_t>::to(v));
+		case Type::tFloat:
+			return Variant((double)cast<float>::to(v));
+		case Type::tDouble:
+			return Variant((double)cast<double>::to(v));
+		case Type::tString: {
+			char *s = cast<char *>::to(v);
+			return Variant(String(s ? s : ""));
+		}
+		case Type::tPointer: {
+			void *p = cast<void *>::to(v);
+			return Variant((uint64_t)(uintptr_t)p);
+		}
+		default:
+			return Variant();
+	}
+}
+
+bool DAScriptInstance::call_das_function(const StringName &p_method, const godot::Variant **p_args, int p_argcount, godot::Variant &r_ret, GDExtensionCallError &r_error) {
+	using namespace das;
+	r_error.error = GDEXTENSION_CALL_OK;
+	r_ret = Variant();
+
+	if (!ensure_context()) {
+		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+		return false;
+	}
+
+	std::string method = String(p_method).utf8().get_data();
+	SimFunction *fn = ctx->findFunction(method.c_str());
+	if (!fn) {
+		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+		return false;
+	}
+
+	const uint32_t expected = fn->debugInfo ? fn->debugInfo->count : 0;
+	const uint32_t provided = (uint32_t)p_argcount;
+	const bool can_inject_self = (expected == provided + 1);
+
+	if (expected != provided && !can_inject_self) {
+		r_error.error = GDEXTENSION_CALL_ERROR_TOO_MANY_ARGUMENTS;
+		if (provided < expected) {
+			r_error.error = GDEXTENSION_CALL_ERROR_TOO_FEW_ARGUMENTS;
+		}
+		r_error.argument = (int32_t)expected;
+		return false;
+	}
+
+	vec4f *args = nullptr;
+	const uint32_t final_count = can_inject_self ? expected : provided;
+	if (final_count > 0) {
+		args = (vec4f *)alloca(sizeof(vec4f) * final_count);
+		uint32_t offset = 0;
+		if (can_inject_self) {
+			args[0] = cast<void *>::from((void *)owner);
+			offset = 1;
+		}
+		for (uint32_t i = 0; i < provided; i++) {
+			if (!variant_to_vec4f(*p_args[i], args[i + offset])) {
+				r_error.error = GDEXTENSION_CALL_ERROR_INVALID_ARGUMENT;
+				r_error.argument = (int32_t)i;
+				return false;
+			}
+		}
+	}
+
+	vec4f res = ctx->evalWithCatch(fn, args);
+	if (ctx->getException()) {
+		last_runtime_error = String(ctx->getException());
+		r_error.error = GDEXTENSION_CALL_ERROR_INSTANCE_IS_NULL;
+		return false;
+	}
+
+	TypeInfo *rtype = fn->debugInfo ? fn->debugInfo->result : nullptr;
+	r_ret = vec4f_to_variant(res, rtype);
+	return true;
+}
+#else
+DAScriptInstance::~DAScriptInstance() = default;
+#endif
 
 static GDExtensionBool dasi_set(GDExtensionScriptInstanceDataPtr /*p_instance*/, GDExtensionConstStringNamePtr /*p_name*/, GDExtensionConstVariantPtr /*p_value*/) {
 	return false;
@@ -161,30 +333,51 @@ bool DAScriptInstance::has_method(const StringName &p_method) const {
 	if (!script) {
 		return false;
 	}
-	return script->_has_method(p_method);
+	// Be permissive: allow engine to attempt standard callbacks even if we
+	// didn't discover them (we'll validate at runtime).
+	if (p_method == StringName("_ready") || p_method == StringName("_process") || p_method == StringName("_physics_process") || p_method == StringName("_notification")) {
+		return true;
+	}
+	return script->get_discovered_methods().has(p_method);
 }
 
-void DAScriptInstance::call(const StringName &p_method, const Variant ** /*p_args*/, int /*p_argcount*/, Variant &r_ret, GDExtensionCallError &r_error) {
-	r_ret = Variant();
-
-	if (!has_method(p_method)) {
-		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
-		r_error.argument = 0;
-		r_error.expected = 0;
+void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, int p_argcount, Variant &r_ret, GDExtensionCallError &r_error) {
+	#if DASCRIPT_HAS_DASLANG
+	if (call_das_function(p_method, p_args, p_argcount, r_ret, r_error)) {
 		return;
 	}
-
-	// Real Daslang execution is not yet wired in.
-	// For now, log a message so users see what is happening.
-	UtilityFunctions::push_warning(String("DAScript call stub: ") + String(p_method) + " (Daslang runtime not integrated yet)");
-
+	// If execution failed, surface a useful error in editor.
+	if (!last_runtime_error.is_empty()) {
+		UtilityFunctions::push_error(String("[DAScript] runtime error: ") + last_runtime_error);
+	}
+	#else
+	// Stub: no runtime execution yet.
+	r_ret = Variant();
 	r_error.error = GDEXTENSION_CALL_OK;
-	r_error.argument = 0;
+	r_error.argument = -1;
 	r_error.expected = 0;
+	UtilityFunctions::print(String("[DAScript] call stub: ") + String(p_method));
+	#endif
 }
 
-void DAScriptInstance::notification(int32_t /*p_what*/) {
-	// Hook notifications later (e.g. READY/PROCESS), once runtime is integrated.
+void DAScriptInstance::notification(int32_t p_what) {
+	#if DASCRIPT_HAS_DASLANG
+	// Forward to optional script callbacks.
+	// - _notification(what) or _notification(self, what)
+	// - _ready() or _ready(self)
+	{
+		Variant ret;
+		GDExtensionCallError err;
+		Variant what_arg = p_what;
+		const Variant *args1[1] = { &what_arg };
+		call(StringName("_notification"), args1, 1, ret, err);
+	}
+	if (p_what == Node::NOTIFICATION_READY) {
+		Variant ret;
+		GDExtensionCallError err;
+		call(StringName("_ready"), nullptr, 0, ret, err);
+	}
+	#endif
 }
 
 } // namespace godot

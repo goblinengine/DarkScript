@@ -26,9 +26,9 @@ godot_env = SConscript("../../godot-cpp/SConstruct")
 env = godot_env.Clone()
 
 # Optional daScript submodule location.
-# Expected layout (as submodule): extensions/dascript/thirdparty/daScript
+# Expected layout (as submodule): extensions/dascript/lib/daScript
 # or provided via: scons daslang_path=...
-daslang_path = ARGUMENTS.get("daslang_path", "thirdparty/daScript")
+daslang_path = ARGUMENTS.get("daslang_path", "lib/daScript")
 daslang_abs = os.path.join(os.getcwd(), daslang_path)
 
 has_daslang = os.path.isdir(daslang_abs)

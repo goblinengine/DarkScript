@@ -21,7 +21,7 @@ DaScript execution and API bindings generation are stubbed/placeholder for now.
 
 - Extension code: `extensions/dascript/src`
 - Godot addon loader: `addons/dascript/dascript.gdextension`
-- Optional Daslang submodule: `extensions/dascript/thirdparty/daScript`
+- Optional Daslang submodule: `extensions/dascript/lib/daScript`
 
 ## Next steps (planned)
 

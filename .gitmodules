@@ -1,6 +1,3 @@
 [submodule "lib/daScript"]
 	path = lib/daScript
 	url = https://github.com/GaijinEntertainment/daScript.git
-[submodule "lib/TinySoundFont"]
-	path = lib/TinySoundFont
-	url = https://github.com/schellingb/TinySoundFont.git

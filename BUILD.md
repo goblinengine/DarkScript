@@ -11,7 +11,7 @@ This repository is expected to be used with submodules:
 
 Suggested layout:
 
-- `extensions/dascript/thirdparty/daScript` (git submodule pointing at https://github.com/GaijinEntertainment/daScript)
+- `extensions/dascript/lib/daScript` (git submodule pointing at https://github.com/GaijinEntertainment/daScript)
 
 ## Build (Windows)
 

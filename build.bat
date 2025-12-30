@@ -44,4 +44,4 @@ if errorlevel 1 (
 )
 
 echo Build succeeded!
-echo Output: addons\dascript\bin\
+echo Output: godot_project\addons\dascript\bin\

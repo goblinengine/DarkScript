@@ -59,6 +59,7 @@ sources = [
     "src/dascript_script.cpp",
     "src/dascript_instance.cpp",
     "src/dascript_variant_glue.cpp",
+    "src/dascript_resource_loader.cpp",
     "src/register_types.cpp",
 ]
 
@@ -110,7 +111,7 @@ env.AppendUnique(CPPPATH=[
 suffix = env.get("suffix", "")
 lib_basename = "dascript" + suffix
 
-out_dir = "../../addons/dascript/bin"
+out_dir = "../../godot_project/addons/dascript/bin"
 if not os.path.isdir(out_dir):
     os.makedirs(out_dir)
 

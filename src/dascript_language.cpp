@@ -1,5 +1,6 @@
 #include "dascript_language.h"
 
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "dascript_script.h"
@@ -8,8 +9,29 @@ namespace godot {
 
 DAScriptLanguage *DAScriptLanguage::singleton = nullptr;
 
+static const char *DAS_SIMPLE_TEMPLATE = R""""(require godot
+
+// class: _CLASS_
+// base: _BASE_
+
+def _ready()
+_TS_pass
+
+def _process(delta: float)
+_TS_pass
+)"""";
+
+static String _das_get_indentation() {
+	// Keep it simple for now. Later we can read the editor's indentation settings in TOOLS builds.
+	return "\t";
+}
+
 String DAScriptLanguage::_get_name() const {
 	return "DAScript";
+}
+
+void DAScriptLanguage::_init() {
+	// Language initialization (called once when the language is registered)
 }
 
 String DAScriptLanguage::_get_type() const {
@@ -19,6 +41,10 @@ String DAScriptLanguage::_get_type() const {
 
 String DAScriptLanguage::_get_extension() const {
 	return "das";
+}
+
+void DAScriptLanguage::_finish() {
+	// Language cleanup (called when the language is unregistered)
 }
 
 PackedStringArray DAScriptLanguage::_get_recognized_extensions() const {
@@ -88,6 +114,14 @@ PackedStringArray DAScriptLanguage::_get_comment_delimiters() const {
 	return delims;
 }
 
+PackedStringArray DAScriptLanguage::_get_doc_comment_delimiters() const {
+	PackedStringArray delims;
+	// daScript doesn't have a dedicated doc-comment syntax; offer common choices.
+	delims.push_back("///");
+	delims.push_back("/** */");
+	return delims;
+}
+
 PackedStringArray DAScriptLanguage::_get_string_delimiters() const {
 	PackedStringArray delims;
 	delims.push_back("\" \"");
@@ -100,9 +134,17 @@ Object *DAScriptLanguage::_create_script() const {
 }
 
 Dictionary DAScriptLanguage::_validate(const String &p_script, const String &p_path, bool /*p_validate_functions*/, bool /*p_validate_errors*/, bool /*p_validate_warnings*/, bool /*p_validate_safe_lines*/) const {
+	// Godot expects certain keys to always exist in the returned Dictionary.
+	// Missing keys can break script creation in the editor.
 	Dictionary result;
-	result["path"] = p_path;
-	result["warnings"] = Array();
+	result[String("path")] = p_path;
+	result[String("valid")] = true;
+	result[String("errors")] = Array();
+	result[String("warnings")] = Array();
+	result[String("functions")] = Array();
+	result[String("safe_lines")] = PackedInt32Array();
+	// Godot requires "inherit" to exist even if empty.
+	result[String("inherit")] = String();
 
 	#if DASCRIPT_HAS_DASLANG
 	Ref<DAScript> scr;
@@ -116,27 +158,17 @@ Dictionary DAScriptLanguage::_validate(const String &p_script, const String &p_p
 			errors = scr->get_compile_errors();
 		} else {
 			Dictionary e;
-			e["line"] = 0;
-			e["column"] = 0;
-			e["message"] = scr->get_compile_error();
+			e[String("line")] = 0;
+			e[String("column")] = 0;
+			e[String("message")] = scr->get_compile_error();
 			errors.push_back(e);
 		}
-		result["valid"] = false;
-	} else {
-		result["valid"] = true;
+		result[String("valid")] = false;
 	}
-	result["errors"] = errors;
-	result["has_runtime"] = true;
-	result["log"] = scr->get_compile_log();
-	return result;
-	#else
-	// No daScript runtime compiled in.
-	result["valid"] = true;
-	result["errors"] = Array();
-	result["has_runtime"] = false;
-	result["note"] = "DAScript was built without embedded daScript runtime.";
-	return result;
+	result[String("errors")] = errors;
 	#endif
+
+	return result;
 }
 
 String DAScriptLanguage::_validate_path(const String &p_path) const {
@@ -151,26 +183,129 @@ Ref<Script> DAScriptLanguage::_make_template(const String &p_template, const Str
 	Ref<DAScript> scr;
 	scr.instantiate();
 
-	String code;
-	if (p_template == "Node") {
-		code = "// DAScript template\n";
-		code += "// class: " + p_class_name + "\n";
-		code += "// base: " + p_base_class_name + "\n\n";
-		code += "require godot\n\n";
-		code += "// Godot calls _ready() with no args.\n";
-		code += "// This extension also supports _ready(self) (self = void?) if you prefer.\n";
-		code += "def _ready() {\n\tgodot::print(\\\"ready\\\")\n}\n\n";
-		code += "// Godot calls _process(delta).\n";
-		code += "// This extension also supports _process(self, delta) (self = void?).\n";
-		code += "def _process(delta: float) {\n}\n";
-	} else {
-		code = "// DAScript\n";
-		code += "require godot\n\n";
-		code += "def _ready() {\n}\n";
-	}
+	// Godot passes the template *content* here.
+	String code = p_template;
+	code = code.replace("_BASE_", p_base_class_name);
+	code = code.replace("_CLASS_", p_class_name);
+	code = code.replace("_TS_", _das_get_indentation());
 
 	scr->set_source_code(code);
 	return scr;
+}
+
+TypedArray<Dictionary> DAScriptLanguage::_get_built_in_templates(const StringName &p_object) const {
+	TypedArray<Dictionary> templates;
+	// Godot expects dictionaries with the ScriptTemplate fields.
+	// The engine checks for "inherit" (base object type) explicitly.
+	Dictionary t;
+	// "id" is required by ScriptLanguageExtension wrapper. Use a stable identifier.
+	t["id"] = 0;
+	t["origin"] = 0; // TemplateOrigin::BUILT_IN = 0
+	t["inherit"] = String(p_object);
+	t["name"] = String("Default");
+	t["description"] = String("Base template for Node with default Godot callbacks");
+	t["content"] = String(DAS_SIMPLE_TEMPLATE);
+	// If Godot asks for templates for an unrelated base, we can still return our default.
+	// This matches the pragmatic behavior in many languages (at least one template exists).
+	templates.push_back(t);
+	return templates;
+}
+
+bool DAScriptLanguage::_is_using_templates() {
+	return true;
+}
+
+bool DAScriptLanguage::_supports_builtin_mode() const {
+	// Allow scripts embedded in scenes/resources.
+	return true;
+}
+
+bool DAScriptLanguage::_supports_documentation() const {
+	return false;
+}
+
+bool DAScriptLanguage::_can_inherit_from_file() const {
+	// Allow extending from other script files.
+	return true;
+}
+
+bool DAScriptLanguage::_has_named_classes() const {
+	return false;
+}
+
+int32_t DAScriptLanguage::_find_function(const String &p_function, const String &p_code) const {
+	(void)p_function;
+	(void)p_code;
+	return -1;
+}
+
+String DAScriptLanguage::_make_function(const String &p_class_name, const String &p_function_name, const PackedStringArray &p_function_args) const {
+	(void)p_class_name;
+	String code;
+	code += "def " + p_function_name + "(";
+	for (int i = 0; i < p_function_args.size(); i++) {
+		if (i > 0) {
+			code += ", ";
+		}
+		code += p_function_args[i];
+	}
+	code += ")\n";
+	code += _das_get_indentation() + "pass\n";
+	return code;
+}
+
+bool DAScriptLanguage::_can_make_function() const {
+	return true;
+}
+
+Error DAScriptLanguage::_open_in_external_editor(const Ref<Script> &p_script, int32_t p_line, int32_t p_column) {
+	(void)p_script;
+	(void)p_line;
+	(void)p_column;
+	return ERR_UNAVAILABLE;
+}
+
+bool DAScriptLanguage::_overrides_external_editor() {
+	return false;
+}
+
+ScriptLanguage::ScriptNameCasing DAScriptLanguage::_preferred_file_name_casing() const {
+	return ScriptLanguage::SCRIPT_NAME_CASING_AUTO;
+}
+
+Dictionary DAScriptLanguage::_complete_code(const String &p_code, const String &p_path, Object *p_owner) const {
+	(void)p_code;
+	(void)p_path;
+	(void)p_owner;
+	return Dictionary();
+}
+
+Dictionary DAScriptLanguage::_lookup_code(const String &p_code, const String &p_symbol, const String &p_path, Object *p_owner) const {
+	(void)p_code;
+	(void)p_symbol;
+	(void)p_path;
+	(void)p_owner;
+	return Dictionary();
+}
+
+String DAScriptLanguage::_auto_indent_code(const String &p_code, int32_t p_from_line, int32_t p_to_line) const {
+	(void)p_from_line;
+	(void)p_to_line;
+	return p_code;
+}
+
+void DAScriptLanguage::_add_global_constant(const StringName &p_name, const Variant &p_value) {
+	(void)p_name;
+	(void)p_value;
+}
+
+void DAScriptLanguage::_add_named_global_constant(const StringName &p_name, const Variant &p_value) {
+	(void)p_name;
+	(void)p_value;
+}
+
+void DAScriptLanguage::_remove_named_global_constant(const StringName &p_name) {
+	(void)p_name;
 }
 
 void DAScriptLanguage::_reload_all_scripts() {
@@ -181,6 +316,25 @@ void DAScriptLanguage::_reload_all_scripts() {
 		}
 	}
 	#endif
+}
+
+void DAScriptLanguage::_reload_scripts(const Array &p_scripts, bool p_soft_reload) {
+	(void)p_soft_reload;
+	for (int i = 0; i < p_scripts.size(); i++) {
+		Ref<Script> s = p_scripts[i];
+		Ref<DAScript> ds = s;
+		if (ds.is_valid()) {
+			ds->_reload(false);
+		}
+	}
+}
+
+void DAScriptLanguage::_reload_tool_script(const Ref<Script> &p_script, bool p_soft_reload) {
+	(void)p_soft_reload;
+	Ref<DAScript> ds = p_script;
+	if (ds.is_valid()) {
+		ds->_reload(false);
+	}
 }
 
 void DAScriptLanguage::_thread_enter() {
@@ -196,6 +350,27 @@ void DAScriptLanguage::_thread_exit() {
 void DAScriptLanguage::_frame() {
 	// Called once per engine frame.
 	// Useful for time-sliced work (compilation queues, etc.).
+}
+
+bool DAScriptLanguage::_handles_global_class_type(const String &p_type) const {
+	// Godot uses this to determine if a global class type belongs to this language.
+	// We currently don't support `class_name`-style global classes, but we must
+	// report our own type so the editor can query safely.
+	return p_type == _get_type() || p_type == _get_name();
+}
+
+Dictionary DAScriptLanguage::_get_global_class_name(const String &p_path) const {
+	// Global class support (class name/base/icon) is not implemented yet.
+	// Return an empty dictionary so Godot treats it as "no global class".
+	// Keys expected by Godot (when supported) are typically: class_name, base_type, icon_path.
+	(void)p_path;
+	return Dictionary();
+}
+
+TypedArray<Dictionary> DAScriptLanguage::_debug_get_current_stack_info() {
+	// Return current stack info for debugging
+	// Empty for now - would need debugger support
+	return TypedArray<Dictionary>();
 }
 
 } // namespace godot

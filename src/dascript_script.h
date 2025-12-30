@@ -56,6 +56,10 @@ public:
 	void _set_source_code(const String &p_code) override;
 	Error _reload(bool p_keep_state) override;
 	bool _has_method(const StringName &p_method) const override;
+	bool _has_static_method(const StringName &p_method) const override;
+	Ref<Script> _get_base_script() const override;
+	void _update_exports() override;
+	TypedArray<Dictionary> _get_documentation() const override;
 	bool _is_tool() const override { return false; }
 	bool _is_valid() const override { return valid; }
 	ScriptLanguage *_get_language() const override;

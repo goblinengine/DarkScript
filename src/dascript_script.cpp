@@ -127,6 +127,13 @@ void DAScript::_set_source_code(const String &p_code) {
 }
 
 Error DAScript::_reload(bool /*p_keep_state*/) {
+	// Handle empty scripts gracefully
+	if (source_code.is_empty()) {
+		valid = true;
+		discovered_methods.clear();
+		return OK;
+	}
+	
 	#if DASCRIPT_HAS_DASLANG
 	return compile_source(false);
 	#else
@@ -201,6 +208,22 @@ Error DAScript::compile_source(bool /*p_keep_state*/) {
 
 bool DAScript::_has_method(const StringName &p_method) const {
 	return discovered_methods.has(p_method);
+}
+
+bool DAScript::_has_static_method(const StringName &p_method) const {
+	return false; // DAScript doesn't support static methods yet
+}
+
+Ref<Script> DAScript::_get_base_script() const {
+	return Ref<Script>(); // No inheritance support yet
+}
+
+void DAScript::_update_exports() {
+	// Called when script properties change in editor
+}
+
+TypedArray<Dictionary> DAScript::_get_documentation() const {
+	return TypedArray<Dictionary>(); // No documentation support yet
 }
 
 ScriptLanguage *DAScript::_get_language() const {

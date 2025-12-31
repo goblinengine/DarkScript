@@ -4,6 +4,7 @@ cmake_temp/
 .DS_Store
 tmtags
 
+*.obj
 *.output
 *.temp
 

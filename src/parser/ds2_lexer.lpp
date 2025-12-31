@@ -267,6 +267,7 @@ void das_accept_cpp_comment ( vector<CommentReader *> & crdi, yyscan_t scanner, 
 <normal>"else"                                          return DAS_ELSE;
 <normal>"finally"                                       return DAS_FINALLY;
 <normal>"def"                                           return DAS_DEF;
+<normal>"func"                                          return DAS_DEF;
 <normal>"with"                                          return DAS_WITH;
 <normal>"aka"                                           return DAS_AKA;
 <normal>"assume"                                        return DAS_ASSUME;

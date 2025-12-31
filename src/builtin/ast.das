@@ -83,16 +83,16 @@ def get_mangled_name(decl : ExprBlock?) {
 class AstFunctionAnnotation {
     def abstract transform(var call : smart_ptr<ExprCallFunc>; var errors : das_string) : ExpressionPtr
     def abstract verifyCall(var call : smart_ptr<ExprCallFunc>; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract apply(var func : FunctionPtr; var group : ModuleGroup; args : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract generic_apply(var func : FunctionPtr; var group : ModuleGroup; args : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract finish(var func : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract patch(var func : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string; var astChanged : bool&) : bool
-    def abstract fixup(var func : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract lint(var func : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
-    def abstract complete(var func : FunctionPtr; var ctx : smart_ptr<Context>) : void
-    def abstract isCompatible(var func : FunctionPtr; var types : VectorTypeDeclPtr; decl : AnnotationDeclaration; var errors : das_string) : bool
+    def abstract apply(var fnptr : FunctionPtr; var group : ModuleGroup; args : AnnotationArgumentList; var errors : das_string) : bool
+    def abstract generic_apply(var fnptr : FunctionPtr; var group : ModuleGroup; args : AnnotationArgumentList; var errors : das_string) : bool
+    def abstract finish(var fnptr : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
+    def abstract patch(var fnptr : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string; var astChanged : bool&) : bool
+    def abstract fixup(var fnptr : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
+    def abstract lint(var fnptr : FunctionPtr; var group : ModuleGroup; args, progArgs : AnnotationArgumentList; var errors : das_string) : bool
+    def abstract complete(var fnptr : FunctionPtr; var ctx : smart_ptr<Context>) : void
+    def abstract isCompatible(var fnptr : FunctionPtr; var types : VectorTypeDeclPtr; decl : AnnotationDeclaration; var errors : das_string) : bool
     def abstract isSpecialized : bool
-    def abstract appendToMangledName(func : FunctionPtr; decl : AnnotationDeclaration; var mangledName : das_string) : void
+    def abstract appendToMangledName(fnptr : FunctionPtr; decl : AnnotationDeclaration; var mangledName : das_string) : void
 }
 
 [macro_interface]

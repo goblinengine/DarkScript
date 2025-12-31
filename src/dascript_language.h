@@ -4,6 +4,8 @@
 #include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 
+#include <mutex>
+
 namespace godot {
 
 class DAScriptLanguage : public ScriptLanguageExtension {
@@ -17,6 +19,7 @@ protected:
 public:
 	static DAScriptLanguage *get_singleton() { return singleton; }
 	static void set_language_singleton(DAScriptLanguage *p_singleton) { singleton = p_singleton; }
+	static std::recursive_mutex &get_language_mutex();
 
 	// Validation diagnostics cache (populated by compile-on-save / tool reload).
 	static void cache_validation_result(const String &p_path, uint64_t p_source_hash, const Array &p_errors, bool p_valid);

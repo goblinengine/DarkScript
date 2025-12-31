@@ -20,7 +20,14 @@ struct ValidationCacheEntry {
 
 static std::mutex s_validation_cache_mutex;
 static HashMap<String, ValidationCacheEntry> s_validation_cache;
+
+// Single lock shared between compilation/reload and instance calls.
+static std::recursive_mutex s_language_mutex;
 } // namespace
+
+std::recursive_mutex &DAScriptLanguage::get_language_mutex() {
+	return s_language_mutex;
+}
 
 void DAScriptLanguage::cache_validation_result(const String &p_path, uint64_t p_source_hash, const Array &p_errors, bool p_valid) {
 	if (p_path.is_empty()) {
@@ -390,8 +397,12 @@ Dictionary DAScriptLanguage::_complete_code(const String &p_code, const String &
 	(void)p_path;
 	(void)p_owner;
 	Dictionary d;
-	// Godot expects a dictionary with a "result" key.
+	// Godot expects certain keys to exist even when completion is unavailable.
+	// Returning empty dictionaries will trigger editor errors/asserts.
 	d["result"] = (int)ERR_UNAVAILABLE;
+	d["force"] = false;
+	// Godot 4.5+ expects this key (String) to exist.
+	d["call_hint"] = String();
 	return d;
 }
 
@@ -401,8 +412,10 @@ Dictionary DAScriptLanguage::_lookup_code(const String &p_code, const String &p_
 	(void)p_path;
 	(void)p_owner;
 	Dictionary d;
-	// Godot expects a dictionary with a "result" key.
+	// Godot expects certain keys to exist even when lookup is unavailable.
 	d["result"] = (int)ERR_UNAVAILABLE;
+	// Any valid value is fine when result is unavailable; engine only checks presence.
+	d["type"] = (int)ScriptLanguageExtension::LOOKUP_RESULT_MAX;
 	return d;
 }
 
@@ -452,7 +465,31 @@ void DAScriptLanguage::_reload_tool_script(const Ref<Script> &p_script, bool p_s
 	Ref<DAScript> ds = p_script;
 	if (ds.is_valid()) {
 		#if DASCRIPT_HAS_DASLANG
-		ds->compile_for_tools();
+		Error err = ds->compile_for_tools();
+		// Match the official module's behavior: surface errors in the editor output.
+		// This path is called by the editor (main thread) when scripts are reloaded.
+		if (err != OK || !ds->is_valid()) {
+			String path = ds->get_path();
+			if (path.is_empty()) {
+				path = String("<dascript>");
+			}
+			if (!ds->get_compile_error().is_empty()) {
+				UtilityFunctions::push_error(String("[DAScript] ") + path + String(": ") + ds->get_compile_error());
+			}
+			const Array &errs = ds->get_compile_errors();
+			for (int i = 0; i < errs.size(); i++) {
+				Dictionary e = errs[i];
+				int line = e.has("line") ? (int)e["line"] : 0;
+				int column = e.has("column") ? (int)e["column"] : 0;
+				String msg = e.has("message") ? String(e["message"]) : String("(error)");
+				String extra = e.has("extra") ? String(e["extra"]) : String();
+				String full = String("[DAScript] ") + path + String(":") + itos(line) + String(":") + itos(column) + String(": ") + msg;
+				if (!extra.is_empty()) {
+					full += String(" | ") + extra;
+				}
+				UtilityFunctions::push_error(full);
+			}
+		}
 		#else
 		ds->_reload(false);
 		#endif

@@ -3,10 +3,12 @@
 #include <godot_cpp/classes/object.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <vector>
 #include <cstdlib>
+#include <cstring>
 
 #include "dascript_script.h"
 #include "dascript_language.h"
@@ -30,7 +32,40 @@ static bool das_trace_enabled() {
 }
 
 #if DASCRIPT_HAS_DASLANG
+
+// Route daScript runtime output to Godot (so builtin print/error work naturally).
+class GodotDasContext final : public das::Context {
+public:
+	using das::Context::Context;
+
+	void to_out(const das::LineInfo * /*at*/, int level, const char *message) override {
+		if (!message) {
+			return;
+		}
+		// daScript uses LogLevel::error for errors; everything else is a normal print.
+		if (level == das::LogLevel::error) {
+			UtilityFunctions::printerr(String(message));
+		} else {
+			UtilityFunctions::print(String(message));
+		}
+	}
+};
+
 DAScriptInstance::~DAScriptInstance() {
+	if (script) {
+		script->_unregister_instance(this);
+	}
+	if (ctx) {
+		delete ctx;
+		ctx = nullptr;
+	}
+}
+
+void DAScriptInstance::invalidate_context() {
+	// Called under language lock from DAScript::compile_source.
+	ctx_ready = false;
+	runtime_error_reported = false;
+	last_runtime_error = "";
 	if (ctx) {
 		delete ctx;
 		ctx = nullptr;
@@ -67,22 +102,62 @@ bool DAScriptInstance::ensure_context() {
 	auto program = script->get_compiled_program();
 	if (!program) {
 		// Compile on-demand (important for Play-in-Editor where is_editor_hint() is still true).
-		script->compile_silent();
+		Error compile_err = script->compile_silent();
 		program = script->get_compiled_program();
-		if (!program) {
+		if (!program || compile_err != OK) {
 			last_runtime_error = "Script has no compiled program (reload/compile failed).";
 			return false;
 		}
 	}
-	if (!ctx) {
-		ctx = new das::Context((uint32_t)program->getContextStackSize());
+	if (program->failed()) {
+		last_runtime_error = "Compiled program has errors (check script for syntax/type errors).";
+		return false;
 	}
+	// Verify program is valid and not in a failed state before attempting simulation.
+	if (program->failed()) {
+		last_runtime_error = "Compiled program has errors; cannot simulate.";
+		return false;
+	}
+
+	if (!ctx) {
+		try {
+			ctx = new GodotDasContext((uint32_t)program->getContextStackSize());
+		} catch (const std::exception &e) {
+			last_runtime_error = String("Failed to create daScript context: ") + String(e.what());
+			return false;
+		} catch (...) {
+			last_runtime_error = "Failed to create daScript context (unknown exception).";
+			return false;
+		}
+	}
+
 	das::TextWriter logs;
-	if (!program->simulate(*ctx, logs)) {
+	bool sim_ok = false;
+	try {
+		sim_ok = program->simulate(*ctx, logs);
+	} catch (const std::exception &e) {
+		last_runtime_error = String("Exception during simulate: ") + String(e.what());
+		return false;
+	} catch (...) {
+		last_runtime_error = "Exception during simulate (unknown).";
+		return false;
+	}
+
+	if (!sim_ok) {
 		last_runtime_error = String("daScript simulate failed: ") + String(logs.str().c_str());
 		return false;
 	}
-	ctx->runInitScript();
+
+	try {
+		ctx->runInitScript();
+	} catch (const std::exception &e) {
+		last_runtime_error = String("Exception during runInitScript: ") + String(e.what());
+		return false;
+	} catch (...) {
+		last_runtime_error = "Exception during runInitScript (unknown).";
+		return false;
+	}
+
 	ctx_ready = true;
 	// Script successfully initialized again; allow reporting future runtime errors.
 	runtime_error_reported = false;
@@ -159,14 +234,23 @@ bool DAScriptInstance::call_das_function(const StringName &p_method, const godot
 	using namespace das;
 	r_error.error = GDEXTENSION_CALL_OK;
 	r_ret = Variant();
+	std::lock_guard<std::recursive_mutex> lang_lock(DAScriptLanguage::get_language_mutex());
 
+	struct CtxLockGuard {
+		das::Context *ctx = nullptr;
+		bool locked = false;
+		~CtxLockGuard() {
+			if (locked && ctx) {
+				ctx->unlock();
+			}
+		}
+	};
+
+	try {
 	if (!ensure_context()) {
 		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
 		return false;
 	}
-
-	// Ensure the VM is in a clean state for this call.
-	ctx->restart();
 
 	std::string method = String(p_method).utf8().get_data();
 	SimFunction *fn = ctx->findFunction(method.c_str());
@@ -234,24 +318,57 @@ bool DAScriptInstance::call_das_function(const StringName &p_method, const godot
 			offset = 1;
 		}
 		for (uint32_t i = 0; i < provided; i++) {
-			if (!variant_to_vec4f(*p_args[i], args[i + offset])) {
-				r_error.error = GDEXTENSION_CALL_ERROR_INVALID_ARGUMENT;
-				r_error.argument = (int32_t)i;
-				return false;
+			// Special-case strings: our generic helper used to reuse one buffer for all
+			// arguments. Stack-copy each string so pointers remain stable for the duration
+			// of evalWithCatch.
+			if (p_args[i] && p_args[i]->get_type() == Variant::Type::STRING) {
+				CharString cs = String(*p_args[i]).utf8();
+				const char *src = cs.get_data();
+				size_t len = src ? std::strlen(src) : 0;
+				char *buf = (char *)alloca(len + 1);
+				if (len > 0) {
+					std::memcpy(buf, src, len);
+				}
+				buf[len] = '\0';
+				args[i + offset] = cast<char *>::from(buf);
+			} else {
+				if (!variant_to_vec4f(*p_args[i], args[i + offset])) {
+					r_error.error = GDEXTENSION_CALL_ERROR_INVALID_ARGUMENT;
+					r_error.argument = (int32_t)i;
+					return false;
+				}
 			}
 		}
 	}
 
+	// Match official godot-das flow: restart+lock around execution.
+	CtxLockGuard ctx_guard;
+	ctx_guard.ctx = ctx;
+	ctx->tryRestartAndLock();
+	ctx_guard.locked = true;
 	vec4f res = ctx->evalWithCatch(fn, args);
+	ctx->unlock();
+	ctx_guard.locked = false;
 	if (ctx->getException()) {
 		last_runtime_error = String(ctx->getException());
-		r_error.error = GDEXTENSION_CALL_ERROR_INSTANCE_IS_NULL;
+		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
 		return false;
 	}
 
 	TypeInfo *rtype = fn->debugInfo ? fn->debugInfo->result : nullptr;
 	r_ret = vec4f_to_variant(res, rtype);
 	return true;
+	} catch (const std::exception &e) {
+		last_runtime_error = String("Exception during function call '") + String(p_method) + String("': ") + String(e.what());
+		UtilityFunctions::push_error(String("[DAScript] ") + last_runtime_error);
+		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+		return false;
+	} catch (...) {
+		last_runtime_error = String("Unknown exception during function call '") + String(p_method) + String("'.");
+		UtilityFunctions::push_error(String("[DAScript] ") + last_runtime_error);
+		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+		return false;
+	}
 }
 #else
 DAScriptInstance::~DAScriptInstance() = default;
@@ -407,6 +524,9 @@ void *DAScriptInstance::create(Object *p_owner, DAScript *p_script) {
 	};
 
 	DAScriptInstance *inst = memnew(DAScriptInstance(p_owner, p_script));
+	if (p_script) {
+		p_script->_register_instance(inst);
+	}
 	if (das_trace_enabled()) {
 		String owner_class = p_owner ? p_owner->get_class() : String("<null>");
 		String script_path = p_script ? p_script->get_path() : String("<null>");
@@ -419,16 +539,43 @@ bool DAScriptInstance::has_method(const StringName &p_method) const {
 	if (!script) {
 		return false;
 	}
-	// Be permissive: allow engine to attempt standard callbacks even if we
-	// didn't discover them (we'll validate at runtime).
-	if (p_method == StringName("_ready") || p_method == StringName("_process") || p_method == StringName("_physics_process") || p_method == StringName("_notification")) {
-		return true;
-	}
 	return script->get_discovered_methods().has(p_method);
 }
 
 void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, int p_argcount, Variant &r_ret, GDExtensionCallError &r_error) {
 	#if DASCRIPT_HAS_DASLANG
+	// In the editor process, only run scripts marked @tool.
+	// (When you actually run the game from the editor, it typically runs in a separate
+	// process where is_editor_hint() is false, or has a SceneTree main loop.)
+	if (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
+		bool running_game = false;
+		if (Engine::get_singleton()->get_main_loop()) {
+			running_game = (Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop()) != nullptr);
+		}
+		if (!running_game && script) {
+			// Determine tool mode via daScript compilation options (no ad-hoc source parsing).
+			// Example in .das: `options tool=true`
+			if (!script->is_tool_script()) {
+				Error compile_err = script->compile_silent();
+				// If compilation failed, do not proceed - script is not executable.
+				if (compile_err != OK || !script->is_valid()) {
+					r_ret = Variant();
+					r_error.error = GDEXTENSION_CALL_OK;
+					r_error.argument = -1;
+					r_error.expected = 0;
+					return;
+				}
+			}
+			if (!script->is_tool_script()) {
+			r_ret = Variant();
+			r_error.error = GDEXTENSION_CALL_OK;
+			r_error.argument = -1;
+			r_error.expected = 0;
+			return;
+			}
+		}
+	}
+
 	// Avoid spamming errors while the editor is just probing the script, but do report
 	// errors when the instance is actually running (e.g. Play-in-Editor callbacks).
 	const bool editor_hint = (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint());
@@ -438,6 +585,16 @@ void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, 
 			allow_report = Object::cast_to<Node>(owner)->is_inside_tree();
 		}
 	}
+
+	// Critical safety check: do not attempt execution if script is invalid.
+	if (!script || !script->is_valid()) {
+		r_ret = Variant();
+		r_error.error = GDEXTENSION_CALL_OK;
+		r_error.argument = -1;
+		r_error.expected = 0;
+		return;
+	}
+
 	if (call_das_function(p_method, p_args, p_argcount, r_ret, r_error)) {
 		return;
 	}

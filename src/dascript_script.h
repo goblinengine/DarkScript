@@ -12,6 +12,8 @@
 
 namespace godot {
 
+class DAScriptInstance;
+
 class DAScript : public ScriptExtension {
 	GDCLASS(DAScript, ScriptExtension)
 
@@ -21,6 +23,7 @@ class DAScript : public ScriptExtension {
 	StringName base_type = "Node";
 	HashSet<StringName> discovered_methods;
 	bool valid = true;
+	bool tool = false;
 
 #if DASCRIPT_HAS_DASLANG
 	das::ProgramPtr compiled_program;
@@ -29,6 +32,10 @@ class DAScript : public ScriptExtension {
 	String compile_log;
 	String compile_error;
 	Array compile_errors;
+
+	// Track instances so we can invalidate their contexts after successful recompiles.
+	HashSet<DAScriptInstance *> instances;
+	mutable std::mutex instances_mutex;
 
 	static HashSet<DAScript *> live_scripts;
 #endif
@@ -47,6 +54,7 @@ public:
 	~DAScript();
 
 	bool is_valid() const { return valid; }
+	bool is_tool_script() const { return tool; }
 
 	bool _editor_can_reload_from_file() override { return true; }
 	bool _can_instantiate() const override { return valid; }
@@ -74,7 +82,7 @@ public:
 	Ref<Script> _get_base_script() const override;
 	void _update_exports() override;
 	TypedArray<Dictionary> _get_documentation() const override;
-	bool _is_tool() const override { return false; }
+	bool _is_tool() const override { return tool; }
 	bool _is_valid() const override { return valid; }
 	bool _is_abstract() const override { return false; }
 	ScriptLanguage *_get_language() const override;
@@ -94,6 +102,9 @@ public:
 	Error compile_silent();
 	Error compile_for_tools();
 	static const HashSet<DAScript *> &get_live_scripts() { return live_scripts; }
+	void _register_instance(DAScriptInstance *p_instance);
+	void _unregister_instance(DAScriptInstance *p_instance);
+	void _invalidate_all_instances();
 #endif
 
 	// Helpers

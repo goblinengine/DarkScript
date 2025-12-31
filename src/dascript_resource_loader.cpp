@@ -1,6 +1,7 @@
 #include "dascript_resource_loader.h"
 
 #include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -114,12 +115,16 @@ Error DAScriptResourceFormatSaver::_save(const Ref<Resource> &p_resource, const 
 	file->close();
 
 	// Development ergonomics: compile on save so syntax errors are visible immediately.
-	// Note: this compiles an in-memory copy with default options injected for compilation,
-	// but does not modify the saved file.
 	#if DASCRIPT_HAS_DASLANG
-	{
-		// compile_for_tools() handles emitting detailed diagnostics itself.
-		script->compile_for_tools();
+	// Delegate to the same tool-reload path Godot uses for scripts.
+	// We can't reliably query ScriptServer reload-on-save from GDExtension in this repo.
+	if (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
+		if (DAScriptLanguage::get_singleton()) {
+			DAScriptLanguage::get_singleton()->_reload_tool_script(script, true);
+		} else {
+			// Fallback: still update diagnostics cache.
+			script->compile_for_tools();
+		}
 	}
 	#endif
 

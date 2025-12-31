@@ -6,6 +6,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <vector>
+#include <cstdlib>
 
 #include "dascript_script.h"
 #include "dascript_language.h"
@@ -17,6 +18,16 @@
 #include <daScript/simulate/debug_info.h>
 #endif
 namespace godot {
+
+static bool das_trace_enabled() {
+	static int cached = -1;
+	if (cached != -1) {
+		return cached == 1;
+	}
+	const char *v = std::getenv("DASCRIPT_TRACE");
+	cached = (v && v[0] == '1') ? 1 : 0;
+	return cached == 1;
+}
 
 #if DASCRIPT_HAS_DASLANG
 DAScriptInstance::~DAScriptInstance() {
@@ -31,20 +42,37 @@ bool DAScriptInstance::ensure_context() {
 		return true;
 	}
 	last_runtime_error = "";
-	runtime_error_reported = false;
 
-	if (!script || !script->is_valid()) {
-		last_runtime_error = "Script is not valid.";
+	if (!script) {
+		last_runtime_error = "Script is null.";
 		return false;
+	}
+	if (!script->is_valid()) {
+		// Try to recover by compiling on-demand.
+		#if DASCRIPT_HAS_DASLANG
+		script->compile_silent();
+		#endif
+		if (!script->is_valid()) {
+			#if DASCRIPT_HAS_DASLANG
+			if (!script->get_compile_error().is_empty()) {
+				last_runtime_error = script->get_compile_error();
+			} else
+			#endif
+			{
+				last_runtime_error = "Script is not valid.";
+			}
+			return false;
+		}
 	}
 	auto program = script->get_compiled_program();
 	if (!program) {
-		// In the editor, scripts are often partially typed and not yet compilable.
-		// Never treat this as a runtime error in editor context.
-		if (!(Engine::get_singleton() && Engine::get_singleton()->is_editor_hint())) {
+		// Compile on-demand (important for Play-in-Editor where is_editor_hint() is still true).
+		script->compile_silent();
+		program = script->get_compiled_program();
+		if (!program) {
 			last_runtime_error = "Script has no compiled program (reload/compile failed).";
+			return false;
 		}
-		return false;
 	}
 	if (!ctx) {
 		ctx = new das::Context((uint32_t)program->getContextStackSize());
@@ -56,6 +84,8 @@ bool DAScriptInstance::ensure_context() {
 	}
 	ctx->runInitScript();
 	ctx_ready = true;
+	// Script successfully initialized again; allow reporting future runtime errors.
+	runtime_error_reported = false;
 	return true;
 }
 
@@ -135,8 +165,47 @@ bool DAScriptInstance::call_das_function(const StringName &p_method, const godot
 		return false;
 	}
 
+	// Ensure the VM is in a clean state for this call.
+	ctx->restart();
+
 	std::string method = String(p_method).utf8().get_data();
 	SimFunction *fn = ctx->findFunction(method.c_str());
+	if (!fn) {
+		// daScript may qualify function names depending on how the file/module was compiled
+		// (e.g. "some_module::_ready"). Godot callbacks are typically unqualified.
+		// Fall back to suffix matching.
+		const std::string suffix1 = std::string("::") + method;
+		const std::string suffix2 = std::string(".") + method;
+		auto ends_with = [](std::string_view s, std::string_view suf) -> bool {
+			return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+		};
+		SimFunction *candidate = nullptr;
+		int candidate_count = 0;
+		const int total = ctx->getTotalFunctions();
+		for (int i = 0; i < total; i++) {
+			SimFunction *f = ctx->getFunction(i);
+			if (!f || !f->name) {
+				continue;
+			}
+			const std::string_view name_view(f->name);
+			if (name_view == method) {
+				candidate = f;
+				candidate_count = 1;
+				break;
+			}
+			if ((name_view.size() > suffix1.size() && ends_with(name_view, suffix1)) ||
+					(name_view.size() > suffix2.size() && ends_with(name_view, suffix2))) {
+				candidate = f;
+				candidate_count++;
+			}
+		}
+		if (candidate_count == 1 && candidate) {
+			fn = candidate;
+		} else {
+			r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
+			return false;
+		}
+	}
 	if (!fn) {
 		r_error.error = GDEXTENSION_CALL_ERROR_INVALID_METHOD;
 		return false;
@@ -243,6 +312,9 @@ static GDExtensionInt dasi_get_method_argument_count(GDExtensionScriptInstanceDa
 static void dasi_call(GDExtensionScriptInstanceDataPtr p_self, GDExtensionConstStringNamePtr p_method, const GDExtensionConstVariantPtr *p_args, GDExtensionInt p_argument_count, GDExtensionVariantPtr r_return, GDExtensionCallError *r_error) {
 	auto *inst = reinterpret_cast<DAScriptInstance *>(p_self);
 	const StringName &method = *reinterpret_cast<const StringName *>(p_method);
+	if (das_trace_enabled()) {
+		UtilityFunctions::print(String("[DAScript][trace] call: ") + String(method) + String(" argc=") + itos((int)p_argument_count));
+	}
 
 	Variant ret;
 	GDExtensionCallError err{};
@@ -267,6 +339,9 @@ static void dasi_call(GDExtensionScriptInstanceDataPtr p_self, GDExtensionConstS
 
 static void dasi_notification(GDExtensionScriptInstanceDataPtr p_instance, int32_t p_what, GDExtensionBool /*p_reversed*/) {
 	auto *inst = reinterpret_cast<DAScriptInstance *>(p_instance);
+	if (das_trace_enabled()) {
+		UtilityFunctions::print(String("[DAScript][trace] notification what=") + itos(p_what));
+	}
 	inst->notification(p_what);
 }
 
@@ -332,6 +407,11 @@ void *DAScriptInstance::create(Object *p_owner, DAScript *p_script) {
 	};
 
 	DAScriptInstance *inst = memnew(DAScriptInstance(p_owner, p_script));
+	if (das_trace_enabled()) {
+		String owner_class = p_owner ? p_owner->get_class() : String("<null>");
+		String script_path = p_script ? p_script->get_path() : String("<null>");
+		UtilityFunctions::print(String("[DAScript][trace] instance_create owner=") + owner_class + String(" script=") + script_path);
+	}
 	return internal::gdextension_interface_script_instance_create3(&info, reinterpret_cast<GDExtensionScriptInstanceDataPtr>(inst));
 }
 
@@ -349,13 +429,20 @@ bool DAScriptInstance::has_method(const StringName &p_method) const {
 
 void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, int p_argcount, Variant &r_ret, GDExtensionCallError &r_error) {
 	#if DASCRIPT_HAS_DASLANG
-	// Never spam errors while the editor is just probing the script.
+	// Avoid spamming errors while the editor is just probing the script, but do report
+	// errors when the instance is actually running (e.g. Play-in-Editor callbacks).
 	const bool editor_hint = (Engine::get_singleton() && Engine::get_singleton()->is_editor_hint());
+	bool allow_report = !editor_hint;
+	if (editor_hint) {
+		if (Object::cast_to<Node>(owner)) {
+			allow_report = Object::cast_to<Node>(owner)->is_inside_tree();
+		}
+	}
 	if (call_das_function(p_method, p_args, p_argcount, r_ret, r_error)) {
 		return;
 	}
 	// If execution failed, surface a useful error once (outside editor).
-	if (!editor_hint && !last_runtime_error.is_empty() && !runtime_error_reported) {
+	if (allow_report && !last_runtime_error.is_empty() && !runtime_error_reported) {
 		runtime_error_reported = true;
 		UtilityFunctions::push_error(String("[DAScript] runtime error: ") + last_runtime_error);
 	}
@@ -371,20 +458,20 @@ void DAScriptInstance::call(const StringName &p_method, const Variant **p_args, 
 
 void DAScriptInstance::notification(int32_t p_what) {
 	#if DASCRIPT_HAS_DASLANG
+	if (das_trace_enabled()) {
+		UtilityFunctions::print(String("[DAScript][trace] DAScriptInstance::notification what=") + itos(p_what));
+	}
 	// Forward to optional script callbacks.
 	// - _notification(what) or _notification(self, what)
-	// - _ready() or _ready(self)
+	// NOTE: Do not manually call _ready() here.
+	// Godot already calls lifecycle methods (like _ready) via the ScriptInstance call path.
+	// Dispatching _ready from notification() would cause it to run twice.
 	{
 		Variant ret;
 		GDExtensionCallError err;
 		Variant what_arg = p_what;
 		const Variant *args1[1] = { &what_arg };
 		call(StringName("_notification"), args1, 1, ret, err);
-	}
-	if (p_what == Node::NOTIFICATION_READY) {
-		Variant ret;
-		GDExtensionCallError err;
-		call(StringName("_ready"), nullptr, 0, ret, err);
 	}
 	#endif
 }

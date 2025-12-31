@@ -26,6 +26,8 @@ class DAScriptInstance {
 	bool ctx_ready = false;
 	String last_runtime_error;
 	bool runtime_error_reported = false;
+	bool ready_seen_reported = false;
+	bool functions_dumped = false;
 
 	bool ensure_context();
 	bool call_das_function(const StringName &p_method, const godot::Variant **p_args, int p_argcount, godot::Variant &r_ret, GDExtensionCallError &r_error);

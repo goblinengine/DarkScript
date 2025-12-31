@@ -2,18 +2,34 @@
 
 #include <godot_cpp/variant/variant.hpp>
 
+#if DASCRIPT_HAS_DASLANG
+#include <daScript/daScript.h>
+#include <daScript/misc/smart_ptr.h>
+#endif
+
 namespace godot {
 
-// Placeholder conversion helpers.
-// When Daslang is integrated, these functions should convert between Godot Variant
-// and daScript values (e.g. vec2/vec3, strings, objects).
-
-struct DasValueStub {
-	// Temporary stand-in until daScript types are available.
-	Variant as_variant;
+// Minimal wrapper so daScript can pass Godot Variant values around.
+// We keep it simple for now: store Variant by value.
+struct DasVariant
+#if DASCRIPT_HAS_DASLANG
+		: public das::ptr_ref_count
+#endif
+{
+	Variant value;
 };
 
-DasValueStub godot_variant_to_das_stub(const Variant &p_value);
-Variant das_stub_to_godot_variant(const DasValueStub &p_value);
+// Conversions between Godot Variant and DasVariant
+DasVariant *godot_variant_to_das(const Variant &p_value);
+Variant das_to_godot_variant(const DasVariant *p_value);
+
+// Constructors from common primitive types (keep it small and safe)
+DasVariant *das_make_variant_int(int32_t p_value);
+DasVariant *das_make_variant_int64(int64_t p_value);
+DasVariant *das_make_variant_float(double p_value);
+DasVariant *das_make_variant_bool(bool p_value);
+DasVariant *das_make_variant_string(const char *p_value);
+
+void das_variant_release(DasVariant *p_value);
 
 } // namespace godot

@@ -10,6 +10,7 @@
 
 #include "dascript_language.h"
 #include "dascript_instance.h"
+#include "dascript_variant_glue.h"
 
 #include <exception>
 #include <mutex>
@@ -17,33 +18,52 @@
 #if DASCRIPT_HAS_DASLANG
 #include <daScript/daScript.h>
 #include <daScript/ast/ast.h>
+#include <daScript/ast/ast_handle.h>
+#include <daScript/ast/ast_typefactory_bind.h>
 #include <daScript/simulate/debug_info.h>
+#include <daScript/simulate/debug_print.h>
 
 // Optional: basic module to let scripts interact with Godot.
 // Usage in .das:
 //   require godot
 //   godot::print("hello")
+MAKE_TYPE_FACTORY(GDVariant, godot::DasVariant);
+
 namespace {
 using namespace das;
+using godot::DasVariant;
+using godot::das_make_variant_int;
+using godot::das_make_variant_int64;
+using godot::das_make_variant_float;
+using godot::das_make_variant_bool;
+using godot::das_make_variant_string;
+using godot::das_variant_release;
 
-static void gd_print(const char *p_text) {
-	if (!p_text) {
+static godot::String variant_to_string(const godot::Variant &v) {
+	return v.stringify();
+}
+
+static vec4f gd_print_any(das::Context & /*context*/, das::SimNode_CallBase *call, vec4f *args) {
+	if (!call) {
 		godot::UtilityFunctions::print(godot::String(""));
-		return;
+		return v_zero();
 	}
-	godot::UtilityFunctions::print(godot::String(p_text));
-}
 
-static void gd_print_i32(int32_t p_value) {
-	godot::UtilityFunctions::print((int64_t)p_value);
-}
+	das::string out;
+	for (int i = 0; i < call->nArguments; i++) {
+		if (i > 0) {
+			out += " ";
+		}
+		das::TypeInfo *ti = call->types ? call->types[i] : nullptr;
+		if (!ti) {
+			out += "<unknown>";
+			continue;
+		}
+		out += das::debug_value(args[i], ti, das::PrintFlags::singleLine);
+	}
 
-static void gd_print_f64(double p_value) {
-	godot::UtilityFunctions::print((double)p_value);
-}
-
-static void gd_print_bool(bool p_value) {
-	godot::UtilityFunctions::print((bool)p_value);
+	godot::UtilityFunctions::print(godot::String(out.c_str()));
+	return v_zero();
 }
 
 static void gd_call_method0(void *p_self, const char *p_method) {
@@ -59,14 +79,38 @@ public:
 	Module_Godot() : Module("godot") {
 		ModuleLibrary lib(this);
 		lib.addBuiltInModule();
-		// Provide a few overloads for convenience.
-		addExtern<DAS_BIND_FUN(gd_print), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print")
-			->args({"text"});
-		addExtern<DAS_BIND_FUN(gd_print_i32), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_i32")
+		// Handled type (refcounted) - avoids copy/move restrictions for Variant.
+		addAnnotation(make_smart<ManagedStructureAnnotation<DasVariant, true, true>>("GDVariant", lib, "godot::DasVariant"));
+		// print(...) without wrappers: accept arbitrary types via vec4f + TypeInfo.
+		addInterop<gd_print_any, void, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a"});
+		addInterop<gd_print_any, void, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c", "d"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c", "d", "e"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c", "d", "e", "f"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c", "d", "e", "f", "g"});
+		addInterop<gd_print_any, void, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f, vec4f>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_any")
+			->args({"a", "b", "c", "d", "e", "f", "g", "h"});
+
+		// Constructors to build Variant values from primitives.
+		addExtern<DAS_BIND_FUN(das_make_variant_int), SimNode_ExtFuncCall>(*this, lib, "variant_int", SideEffects::none, "das_make_variant_int")
 			->args({"value"});
-		addExtern<DAS_BIND_FUN(gd_print_f64), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_f64")
+		addExtern<DAS_BIND_FUN(das_make_variant_int64), SimNode_ExtFuncCall>(*this, lib, "variant_int64", SideEffects::none, "das_make_variant_int64")
 			->args({"value"});
-		addExtern<DAS_BIND_FUN(gd_print_bool), SimNode_ExtFuncCall>(*this, lib, "print", SideEffects::modifyExternal, "gd_print_bool")
+		addExtern<DAS_BIND_FUN(das_make_variant_float), SimNode_ExtFuncCall>(*this, lib, "variant_float", SideEffects::none, "das_make_variant_float")
+			->args({"value"});
+		addExtern<DAS_BIND_FUN(das_make_variant_bool), SimNode_ExtFuncCall>(*this, lib, "variant_bool", SideEffects::none, "das_make_variant_bool")
+			->args({"value"});
+		addExtern<DAS_BIND_FUN(das_make_variant_string), SimNode_ExtFuncCall>(*this, lib, "variant_string", SideEffects::none, "das_make_variant_string")
+			->args({"value"});
+		addExtern<DAS_BIND_FUN(das_variant_release), SimNode_ExtFuncCall>(*this, lib, "variant_release", SideEffects::modifyExternal, "das_variant_release")
 			->args({"value"});
 		addExtern<DAS_BIND_FUN(gd_call_method0), SimNode_ExtFuncCall>(*this, lib, "call_method0", SideEffects::modifyExternal, "gd_call_method0")
 			->args({"self", "method"});
@@ -308,7 +352,10 @@ Error DAScript::compile_source(bool /*p_keep_state*/) {
 	// Keep access alive for as long as the compiled program exists.
 	compiled_access = access;
 
-	compiled_program = compileDaScript(file_name, access, logs, libGroup);
+	// IMPORTANT: compileDaScript() builds module dependencies but does not expose an exportAll flag.
+	// For Godot script callbacks we need functions to be exported into the runtime Context;
+	// otherwise the simulated Context can end up with 0 callable functions.
+	compiled_program = parseDaScript(file_name, /*moduleName*/"", access, logs, libGroup, /*exportAll*/true);
 	compile_log = String(logs.str().c_str());
 	bool failed = false;
 	if (compiled_program) {

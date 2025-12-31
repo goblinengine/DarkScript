@@ -389,7 +389,10 @@ Dictionary DAScriptLanguage::_complete_code(const String &p_code, const String &
 	(void)p_code;
 	(void)p_path;
 	(void)p_owner;
-	return Dictionary();
+	Dictionary d;
+	// Godot expects a dictionary with a "result" key.
+	d["result"] = (int)ERR_UNAVAILABLE;
+	return d;
 }
 
 Dictionary DAScriptLanguage::_lookup_code(const String &p_code, const String &p_symbol, const String &p_path, Object *p_owner) const {
@@ -397,7 +400,10 @@ Dictionary DAScriptLanguage::_lookup_code(const String &p_code, const String &p_
 	(void)p_symbol;
 	(void)p_path;
 	(void)p_owner;
-	return Dictionary();
+	Dictionary d;
+	// Godot expects a dictionary with a "result" key.
+	d["result"] = (int)ERR_UNAVAILABLE;
+	return d;
 }
 
 String DAScriptLanguage::_auto_indent_code(const String &p_code, int32_t p_from_line, int32_t p_to_line) const {

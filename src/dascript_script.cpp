@@ -77,6 +77,9 @@ static void gd_call_method0(void *p_self, const char *p_method) {
 class Module_Godot : public Module {
 public:
 	Module_Godot() : Module("godot") {
+		// Make the module available without an explicit `require godot` in every script.
+		// This uses daScript's native visibility mechanism (Module::isVisibleDirectly).
+		visibleEverywhere = true;
 		ModuleLibrary lib(this);
 		lib.addBuiltInModule();
 		// Handled type (refcounted) - avoids copy/move restrictions for Variant.

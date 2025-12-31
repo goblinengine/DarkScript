@@ -7,11 +7,11 @@ This extension provides a new Godot 4.5+ scripting language named **DAScript** w
 This repository is expected to be used with submodules:
 
 - `godot-cpp` at repository root (already used by other extensions)
-- `daScript` (Daslang) as a submodule inside this extension
+- `DarkScript` (Daslang fork) as a submodule inside this extension
 
 Suggested layout:
 
-- `extensions/dascript/lib/daScript` (git submodule pointing at https://github.com/GaijinEntertainment/daScript)
+- `extensions/dascript/lib/DarkScript` (git submodule pointing at https://github.com/goblinengine/DarkScript)
 
 ## Build (Windows)
 
